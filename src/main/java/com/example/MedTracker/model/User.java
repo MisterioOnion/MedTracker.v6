@@ -1,16 +1,20 @@
 package com.example.MedTracker.model;
 
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
-import lombok.Data;
-import org.glassfish.grizzly.http.util.TimeStamp;
-
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
 import java.sql.Timestamp;
+import java.util.List;
 
-@Data
+/*бд для пользователей*/
+@Getter
+@Setter
 @Entity(name = "usersDataTable")
 public class User {
 
+
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
     @Id
     private Long chatId;
     private String firstName;
@@ -23,57 +27,19 @@ public class User {
         return registration;
     }
 
-    //public Long getChatId() {
-    //    return chatId;
-    //}
-
-    //public void setChatId(Long chatId) {
-    //    this.chatId = chatId;
-    //}
-
-    //public String getFirstName() {
-    //    return firstName;
-    //}
-
-    //public void setFirstName(String firstName) {
-    //    this.firstName = firstName;
-    //}
-
-    //public String getLastName() {
-    //    return lastName;
-    //}
-
-    //public void setLastName(String lastName) {
-    //    this.lastName = lastName;
-    //}
-
-    //public String getUserName() {
-    //    return userName;
-    //}
-
-    //public void setUserName(String userName) {
-    //    this.userName = userName;
-    //}
-
-    //public Timestamp getRegisteredAt() {
-    //    return registeredAt;
-    //}
-
-   //public void setRegisteredAt(Timestamp registeredAt) {
-   //    this.registeredAt = registeredAt;
-   //}
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
+    private List<Medication> medications;
 
     @Override
     public String toString() {
         return "User{" +
-                "chatId=" + chatId +
+                "id=" + id +
                 ", firstName='" + firstName + '\'' +
                 ", lastName='" + lastName + '\'' +
                 ", userName='" + userName + '\'' +
                 ", registeredAt=" + registeredAt +
                 ", registration=" + registration +
+                ", medications=" + medications +
                 '}';
     }
-
-
 }

@@ -17,6 +17,7 @@ public class BotInitializer {
     @Autowired
     MedTrackerBot bot;
 
+    /*главный метод для запуска нового тг бота*/
     @EventListener({ContextRefreshedEvent.class})
     public void init() throws TelegramApiException {
         TelegramBotsApi telegramBotsApi = new TelegramBotsApi(DefaultBotSession.class);
