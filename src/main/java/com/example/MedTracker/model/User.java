@@ -27,7 +27,7 @@ public class User {
         return registration;
     }
 
-    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL)
+    @OneToMany(fetch = FetchType.EAGER, mappedBy = "user", cascade = CascadeType.ALL)
     private List<Medication> medications;
 
     @Override

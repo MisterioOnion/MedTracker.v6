@@ -36,43 +36,6 @@ public class MedicationService {
         this.userRepository = userRepository;
         this.medicationRepository = medicationRepository;
     }
-
-
-
-
-
-
-
-    public MedicationService() {
-        // Инициализация подключения к базе данных
-        try {
-            connection = DriverManager.getConnection("jdbc:mysql://localhost:3306/your_database_name", "your_username", "your_password");
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-    }
-
-    public void addMedication(String name, String description, String startDate, int duration, boolean isRepeated, int frequency) {
-        // Создание SQL-запроса для вставки новой записи в базу данных
-        String query = "INSERT INTO medications (name, description, start_date, duration, is_repeated, frequency) VALUES (?, ?, ?, ?, ?, ?)";
-
-        try {
-            PreparedStatement statement = connection.prepareStatement(query);
-            statement.setString(1, name);
-            statement.setString(2, description);
-            statement.setString(3, startDate);
-            statement.setInt(4, duration);
-            statement.setBoolean(5, isRepeated);
-            statement.setInt(6, frequency);
-
-            // Выполнение SQL-запроса
-            statement.executeUpdate();
-        } catch (SQLException e) {
-            e.printStackTrace();
-        }
-    }
-
-
 }
 
 

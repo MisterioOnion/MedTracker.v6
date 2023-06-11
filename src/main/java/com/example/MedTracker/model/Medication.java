@@ -20,10 +20,12 @@ public class Medication {
     private String medicineName;
     private String description;
     private Timestamp startDate;
+    private Timestamp todayDate;
     private int daysForEndDate;
     private int daysBetweenDoses;
     private Boolean isRepeated;
     private int dosesForDay;
+
 
 
     @ManyToOne
@@ -33,15 +35,16 @@ public class Medication {
     @Override
     public String toString() {
         return "Medication{" +
-                "id=" + id +
+                //"id=" + id +
                 ", medicineName='" + medicineName + '\'' +
                 ", description='" + description + '\'' +
                 ", startDate=" + startDate +
+                ", todayDate=" + todayDate +
                 ", daysForEndDate=" + daysForEndDate +
                 ", daysBetweenDoses=" + daysBetweenDoses +
                 ", isRepeated=" + isRepeated +
                 ", dosesForDay=" + dosesForDay +
-                ", user=" + user +
+                //", user=" + user +
                 '}';
     }
 }
