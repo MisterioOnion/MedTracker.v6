@@ -12,7 +12,6 @@ import java.util.List;
 @Entity(name = "usersDataTable")
 public class User {
 
-
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     @Id
@@ -34,6 +33,7 @@ public class User {
     public String toString() {
         return "User{" +
                 "id=" + id +
+                ", chatId=" + chatId +
                 ", firstName='" + firstName + '\'' +
                 ", lastName='" + lastName + '\'' +
                 ", userName='" + userName + '\'' +

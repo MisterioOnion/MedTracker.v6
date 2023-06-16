@@ -1,28 +1,26 @@
 package com.example.MedTracker.serviceBot;
 
 import java.sql.*;
-import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.*;
+import java.util.Date;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import com.example.MedTracker.configuration.MedTrackerBotConfiguration;
-import com.example.MedTracker.model.Medication;
-import com.example.MedTracker.model.MedicationRepository;
-import com.example.MedTracker.model.User;
-import com.example.MedTracker.model.UserRepository;
+import com.example.MedTracker.model.*;
 import com.vdurmont.emoji.EmojiParser;
 import lombok.extern.slf4j.Slf4j;
-import org.hibernate.Hibernate;
-import org.hibernate.Session;
-import org.hibernate.SessionFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.PropertySource;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.commands.SetMyCommands;
@@ -49,34 +47,59 @@ public class MedTrackerBot extends TelegramLongPollingBot {
     @Autowired
     private MedicationRepository medicationRepository;
     @Autowired
-    private UserService userService;
+    private ReminderTimeRepository reminderTimeRepository;
     @Autowired
-    private MedicationService medicationService;
-    boolean startWait = false; // <- Инициализация булеан переменной в самом начал
+    private UserService userService;
 
     final MedTrackerBotConfiguration config;
     private Map<Long, Integer> requestCounts = new HashMap<>();
     private Map<Long, Long> firstRequestTimes = new HashMap<>();
-    private Map<Long, String> waitingInputs = new HashMap<>();
 
+    // Определение состояний ввода данных
+    enum InputState {
+        NAME,
+        DESCRIPTION,
+        START_DATE,
+        DURATION,
+        DAYS_BETWEEN_DOSES,
+        HH_MM,
+    }
+
+    // Переменная для хранения текущего состояния ввода данных
+    InputState currentState;
+
+    // Переменные для хранения промежуточных значений
+    String medicationName;
+    String description;
+    String startDate;
+    String todayDate;
+    int duration;
+    boolean isRepeated;
+    int daysBetweenDoses;
+    int frequency;
+    int counter = 0;
     String ADD_MEDICATION_TEXT = "Пожалуйста введите информацию о вашем лекарстве.\n\n" +
-            "Через запятую введите:\n" +
-            "- название,\n" +
-            "- описание,\n" +
+            "Последовательно в следующем формате:\n" +
+            "- название лекарства,\n" +
+            "- описание лекарства,\n" +
             "- дату начала в формате (гггг-мм-дд),\n" +
-            "- количество дней приёма,\n" +
-            "- если курс препарата будет проводиться повторно введите true и количество дней через " +
+            "- количество дней приёма лекарства,\n" +
+            "- если курс препарата будет проводиться повторно нажмите Да " +
+            "и затем укажите количество дней через " +
             "которое следует начать повторный приём," +
-            " в противном случае напишите false, а в количестве дней поставьте 0\n" +
-            "- также укажите какое количество раз в день вы будете принимать препарат.\n\n" +
+            " в противном случае нажмите Нет\n" +
+            "- также укажите какое количество раз в день вы будете принимать препарат, " +
+            "нажав на соответствующую кнопку от 1 до 3." +
+            "Не забудьте ввести для них время)\n\n" +
             "Пример ввода:\n" +
-            "Препарат A, краткое описание, 2023-06-08, 7, true, 10, 3\n" +
-            "Препарат A, краткое описание, 2023-06-08, 7, false, 0, 3";
+            "Препарат A, краткое описание, 2023-07-08, 7, Да, 10, 3\n" +
+            "Препарат A, краткое описание, 2023-07-08, 7, Нет, 3";
 
     static final String HELP_TEXT =
             "Вы можете выполнять команды из главного меню слева или введя команду:\n\n" +
                     "Введите /start, чтобы увидеть приветственное сообщение\n\n" +
-                    "Введите /mydata, чтобы просмотреть сохраненные данные о себе\n\n" +
+                    "Введите /history_medication, чтобы просмотреть сохраненные данные о ваших лекарствах\n\n" +
+                    "Введите /add_medication, чтобы добавить новое лекарство\n\n" +
                     "Введите /help, чтобы снова увидеть это сообщение";
     static final String START_TEXT ="Привет! \n" +
             "Я — бот, который напоминает о приеме лекарств.\n" +
@@ -84,26 +107,19 @@ public class MedTrackerBot extends TelegramLongPollingBot {
             "В некоторых случаях своевременный прием лекарств критически необходим для правильного лечения.\n" +
             "\n" +
             "Я внимательно слежу за тем, чтобы вы ничего не забыли и присылаю напоминания.\n";
-    String ERROR_INTEGER_MASSAGE = "Ошибка преобразования числового значения.\n" +
-            "Пожалуйста, введите целочисленные значения для кол-ва дней, интервала и колл-ва доз в день.";
-    String ERROR_TIMESTAMP_MASSAGE = "Ошибка преобразования даты и времени.\n" +
-            "Пожалуйста, введите дату в формате: yyyy-MM-dd";
-    String VALID_MESSAGE = "Ошибка: поля('Дата начала', " +
-            "'Название лекарства', 'Количество дней приема', " +
-            "'Количество таблеток в день') " +
-            "должны быть заполнены корректно и не должны быть пустыми";
-
-    String ERROR_INPUT = "Ошибка ввода данных. Пожалуйста, введите данные в формате:" +
-            " название, описание, дата начала, количество дней, интервал, количество раз в день.";
-
-    String INFO_TEXT = "Введите данные о лекарстве (название, описание, начало, конец, интервал): ";
+    String HH_MM_TEXT="Введите будильники в формате ЧЧ:ММ, где ЧЧ это часы, а ММ это минуты";
     static final String ERROR_TEXT = "ERROR occurred: ";
-    static final String YES_BUTTON = "YES_BUTTON";
-    static final String NO_BUTTON = "NO_BUTTON";
+    static final String YES_REGISTER_BUTTON = "YES_REGISTER_BUTTON";
+    static final String NO_REGISTER_BUTTON = "NO_REGISTER_BUTTON";
+    static final String YES_IS_REPEATED_BUTTON = "YES_IS_REPEATED_BUTTON";
+    static final String NO_IS_REPEATED_BUTTON = "NO_IS_REPEATED_BUTTON";
+    static final String ONE_FREQUENCY_BUTTON = "ONE_FREQUENCY_BUTTON";
+    static final String TWO_FREQUENCY_BUTTON = "TWO_FREQUENCY_BUTTON";
+    static final String THREE_FREQUENCY_BUTTON = "THREE_FREQUENCY_BUTTON";
+
     private static Connection connection;
     private boolean addFlag = false;
 
-    //@Autowired
     public MedTrackerBot( MedTrackerBotConfiguration config) {
 
         this.config = config;
@@ -117,13 +133,10 @@ public class MedTrackerBot extends TelegramLongPollingBot {
         List<BotCommand> listOfCommands = List.of(
                 new BotCommand("/start", "get a welcome message"),
                 new BotCommand("/help", "info how use this bot"),
-                new BotCommand("/mydata", "get your data stored"),
-                new BotCommand("/deletdata", "delete my data"),
-                new BotCommand("/settings", "set your preferences"),
                 new BotCommand("/add_medication", "add new medication"),
-                new BotCommand("/delete_medication", "delete medication"),
-                new BotCommand("/history_medication", "history medication")
-
+                new BotCommand("/history_medication", "history medication"),
+                new BotCommand("/set_reminder", "set a reminder"),
+                new BotCommand("/delete_reminder", "delete reminder")
 
         );
         try {
@@ -147,9 +160,6 @@ public class MedTrackerBot extends TelegramLongPollingBot {
     @Override
     public void onUpdateReceived(Update update){
 
-        //var originalMessage = update.getMessage();
-        //System.out.println(originalMessage.getText());
-
         if(update.hasMessage() && update.getMessage().hasText()){
             String messageText = update.getMessage().getText();
             long chatId = update.getMessage().getChatId();
@@ -160,7 +170,7 @@ public class MedTrackerBot extends TelegramLongPollingBot {
                 var textToSend = EmojiParser.parseToUnicode(messageText.substring(messageText.indexOf(" ")));
                 var users = userRepository.findAll();
                 for (User user: users){
-                    prepareAndSendMessage(user.getChatId(), textToSend);
+                    prepareAndSendMarkdownMessage(user.getChatId(), textToSend, false);
                 }
             } else {
                 // Проверка, является ли пользователь зарегистрированным
@@ -175,14 +185,14 @@ public class MedTrackerBot extends TelegramLongPollingBot {
                             break;
 
                         case "/help":
-                            prepareAndSendMessage(chatId, HELP_TEXT);
+                            prepareAndSendMarkdownMessage(chatId, HELP_TEXT, false);
                             break;
 
                         case "Начать приём нового лекарства":
                         case "/add_medication":
                             this.addFlag = true;
-                            prepareAndSendMessage(chatId, ADD_MEDICATION_TEXT);
-                            InputMessage(messageText, chatId);
+                            prepareAndSendMarkdownMessage(chatId, ADD_MEDICATION_TEXT, false);
+                            InputMedicationMessage(messageText, chatId);
                             break;
 
                         case "/register":
@@ -200,10 +210,10 @@ public class MedTrackerBot extends TelegramLongPollingBot {
                                 String texts = EmojiParser.parseToUnicode(
                                         "Извините, команда пока не работает" + ":disappointed:"
                                 );
-                                prepareAndSendMessage(chatId, texts);
+                                prepareAndSendMarkdownMessage(chatId, texts, false);
                             }
                             else {
-                                InputMessage(messageText, chatId);
+                                InputMedicationMessage(messageText, chatId);
                             }
                     }
                 } else {
@@ -217,7 +227,7 @@ public class MedTrackerBot extends TelegramLongPollingBot {
                             String text = EmojiParser.parseToUnicode(
                                     "Извините, но вы пока не зарегистрированы" + ":disappointed:"+
                                             "\nПройдите регистрацию /register");
-                            prepareAndSendMessage(chatId, text);
+                            prepareAndSendMarkdownMessage(chatId, text, false);
                     }
                 }
             }
@@ -226,7 +236,7 @@ public class MedTrackerBot extends TelegramLongPollingBot {
             long messageId = update.getCallbackQuery().getMessage().getMessageId();
             long chatId = update.getCallbackQuery().getMessage().getChatId();
 
-            if(callbackData.equals(YES_BUTTON)){
+            if(callbackData.equals(YES_REGISTER_BUTTON)){
                 Message message = update.getCallbackQuery().getMessage();
                 if (message != null) {
                     registerUser(message);
@@ -242,20 +252,72 @@ public class MedTrackerBot extends TelegramLongPollingBot {
                     log.error("Received null message in onUpdateReceived");
                 }
             }
-            else if(callbackData.equals(NO_BUTTON)){
+            if(callbackData.equals(NO_REGISTER_BUTTON)){
                 String text = EmojiParser.parseToUnicode(
                         "Жаль.." + ":disappointed:" + " Но мы будем ждать вас." + ":hugs:"
                 );
                 executeEditMessageText(text, chatId, messageId);
+            }
+
+            if (callbackData.equals(YES_IS_REPEATED_BUTTON)) {
+                isRepeated = true;
+                executeEditMessageText("Повторный приём предусмотрен.", chatId, messageId);
+                currentState = InputState.DAYS_BETWEEN_DOSES;
+                prepareAndSendMarkdownMessage(chatId,"Введите через сколько дней после окончания приема начнется новый прием.", false);
+
+            }
+            if (callbackData.equals(NO_IS_REPEATED_BUTTON)) {
+                isRepeated = false;
+                executeEditMessageText("Повторный приём не предусмотрен.", chatId, messageId);
+                currentState = InputState.HH_MM;
+                frequency(chatId);
+
+            }
+
+            if(callbackData.equals(ONE_FREQUENCY_BUTTON)){
+                frequency = 1;
+                addMedicationToBD(chatId);
+
+                String text = EmojiParser.parseToUnicode("Напоминание будет приходить 1 раз в день");
+                executeEditMessageText(text, chatId, messageId);
+                currentState = InputState.HH_MM;
+                sendMessage(chatId, HH_MM_TEXT);
+
+            }
+            if(callbackData.equals(TWO_FREQUENCY_BUTTON)){
+                frequency = 2;
+                addMedicationToBD(chatId);
+
+                String text = EmojiParser.parseToUnicode("Напоминание будет приходить 2 раза в день");
+                executeEditMessageText(text, chatId, messageId);
+                currentState = InputState.HH_MM;
+                sendMessage(chatId, HH_MM_TEXT);
+            }
+            if(callbackData.equals(THREE_FREQUENCY_BUTTON)){
+                frequency = 3;
+                addMedicationToBD(chatId);
+
+                String text = EmojiParser.parseToUnicode("Напоминание будет приходить 3 раза в день");
+                executeEditMessageText(text, chatId, messageId);
+                currentState = InputState.HH_MM;
+                sendMessage(chatId, HH_MM_TEXT);
+
             }
         }
     }
 
     /*получение данных о медикаментах по Id пользователя*/
     protected List<Medication> getMedications(long chatId) {
-        User user = userRepository.findById(chatId).orElse(null);
-        return medicationRepository.findByUser(user);
+        //User user = userRepository.findById(chatId).orElse(null);
+        //return medicationRepository.findByUser(user);
 
+        Optional<User> userOptional = userRepository.findFirstByChatId(chatId);
+        if (userOptional.isPresent()) {
+            User user = userOptional.get();
+            return medicationRepository.findByUser(user);
+        } else {
+            return Collections.emptyList();
+        }
     }
 
     /*  отправка сообщений в телеграмм*/
@@ -265,13 +327,16 @@ public class MedTrackerBot extends TelegramLongPollingBot {
         StringBuilder messageBuilder = new StringBuilder();
         messageBuilder.append("*Ваши лекарства:*\n\n");
 
+        DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+
         for (Medication medication : medications) {
             // Форматируйте данные лекарств по вашему усмотрению
             String medicationInfo = String.format(
-                    "*Название:* %s\n*Описание:* %s\n*Начало:* %s\n*Длительность:* %d дней\n*Частота приема в день:* %d\n",
+                    "*Название:* %s\n*Описание:* %s\n*Начало:* %s\n*Длительность:* " +
+                            "%d дней\n*Частота приема в день:* %d\n",
                     medication.getMedicineName(),
                     medication.getDescription(),
-                    medication.getStartDate(),
+                    medication.getStartDate().format(dateFormatter),
                     medication.getDaysForEndDate(),
                     medication.getDosesForDay());
 
@@ -281,154 +346,150 @@ public class MedTrackerBot extends TelegramLongPollingBot {
                         medication.getDaysBetweenDoses());
 
             } else {
-                medicationInfo += String.format(
-                        "*Повторный приём:* Нет\n\n");
+                medicationInfo += String.format("*Повторный приём:* Нет\n\n");
             }
 
             messageBuilder.append(medicationInfo);
         }
-
         String messageText = messageBuilder.toString();
         prepareAndSendMarkdownMessage(chatId, messageText, true);
-
-
     }
 
-
-    /* Создание SQL-запроса для добавления новой записи в базу данных */
-    protected void addMedication(long chatId, String name, String description, String startDate, String todayDate, int duration, boolean isRepeated, int daysBetweenDoses, int frequency) {
-        try {
-            Medication medication = new Medication();
-            User user = userRepository.findById(chatId).orElse(null);
-
-            medication.setUser(user);
-            medication.setId(chatId);
-            medication.setMedicineName(name);
-            medication.setDescription(description);
-            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
-            Timestamp timestampDate = new Timestamp ((dateFormat.parse(startDate)).getTime());
-            medication.setStartDate(timestampDate);
-            medication.setTodayDate(new Timestamp(System.currentTimeMillis()));
-            medication.setDaysForEndDate(duration);
-            medication.setIsRepeated(isRepeated);
-            medication.setDaysBetweenDoses(daysBetweenDoses);
-            medication.setDosesForDay(frequency);
-            medicationRepository.save(medication);
-        } catch (Exception e) {
-            log.error(ERROR_TEXT + e.getMessage());
-        }
-    }
-
-    // Определение состояний ввода данных
-    enum InputState {
-        NAME,
-        DESCRIPTION,
-        START_DATE,
-        DURATION,
-        IS_REPEATED,
-        DAYS_BETWEEN_DOSES,
-        FREQUENCY
-    }
-
-    // Переменная для хранения текущего состояния ввода данных
-    InputState currentState;
-
-    // Переменные для хранения промежуточных значений
-    String name;
-    String description;
-    String startDate;
-    String todayDate;
-    int duration;
-    boolean isRepeated;
-    int daysBetweenDoses;
-    int frequency;
-
-    // Метод для обработки входящего сообщения
-    private void InputMessage(String userInput, long chatId) {
+    /* Метод для обработки входящего сообщения про лекарства */
+    private void InputMedicationMessage(String userInput, long chatId) {
         if (currentState == null) {
             currentState = InputState.NAME;
-            prepareAndSendMessage(chatId, "Введите название лекарства:");
+            prepareAndSendMarkdownMessage(chatId, "Введите название лекарства.", false);
         } else {
             switch (currentState) {
                 case NAME:
-                    name = userInput.trim();
+                    medicationName = userInput.trim();
                     currentState = InputState.DESCRIPTION;
-                    prepareAndSendMessage(chatId, "Введите описание лекарства:");
+                    prepareAndSendMarkdownMessage(chatId, "Введите описание лекарства.", false);
                     break;
                 case DESCRIPTION:
                     description = userInput.trim();
                     currentState = InputState.START_DATE;
-                    prepareAndSendMessage(chatId, "Введите дату начала приема (в формате ГГГГ-ММ-ДД):");
+                    prepareAndSendMarkdownMessage(
+                            chatId, "Введите дату начала приема (в формате ГГГГ-ММ-ДД).", false);
                     break;
                 case START_DATE:
                     startDate = userInput.trim();
                     // Проверка корректности формата даты
                     if (!isValidDateFormat(startDate)) {
-                        prepareAndSendMessage(chatId,
+                        prepareAndSendMarkdownMessage(chatId,
                                 "Некорректный формат даты. Пожалуйста, введите дату в формате ГГГГ-ММ-ДД, " +
-                                        "где ГГГГ это год, ММ - месяц, ДД - день в числовом формате");
+                                "где ГГГГ это год, ММ - месяц, ДД - день в числовом формате!", false);
                         break;
                     }
                     // Проверка, чтобы дата начала приема не была меньше текущей даты
                     if (isStartDateBeforeToday(startDate)) {
-                        prepareAndSendMessage(chatId, "Дата начала приема не может быть ранее текущей даты.");
+                        prepareAndSendMarkdownMessage(
+                                chatId,
+                                "Дата начала приема не может быть ранее текущей даты!",
+                                false);
                         break;
                     }
                     currentState = InputState.DURATION;
-                    prepareAndSendMessage(chatId, "Введите длительность приема в днях:");
+                    prepareAndSendMarkdownMessage(
+                            chatId, "Введите длительность приема в днях.", false);
+
                     break;
                 case DURATION:
                     try {
                         duration = Integer.parseInt(userInput.trim());
-                        currentState = InputState.IS_REPEATED;
-                        prepareAndSendMessage(chatId, "Введите 'Да' или 'Нет' для указания повторного приема:");
+                        //currentState = InputState.IS_REPEATED;
+                        isRepeated(chatId);
                     } catch (NumberFormatException e) {
-                        prepareAndSendMessage(chatId, "Некорректный ввод. Пожалуйста, введите целое число для длительности приема:");
+                        prepareAndSendMarkdownMessage(
+                                chatId,
+                                "Некорректный ввод. Пожалуйста, введите целое число для длительности приема!",
+                                false);
+                    }
+
+                    break;
+                case HH_MM:
+                    try {
+                        if((counter < frequency) && (isValidTimeFormat(userInput.trim()))){
+                            InputRemiderTimeMessage(userInput.trim(), chatId, frequency);
+                            counter++;
+                            String text = String.format("Вы внесли %d из %d будильников", counter, frequency);
+                            sendMessage(chatId, text);
+                            if (counter == frequency) {
+                                sendMessage(chatId, "Все будильники были введены, больше ввести нельзя!! ");
+                                this.addFlag = false;
+                                currentState = null;
+                                counter = 0;
+                            }
+                        } else {
+                            sendMessage(chatId, "Наверный формат ввода времени." +
+                            "Введите время в формате HH:mm, где HH - часы не более 23, а mm - минуты не более 59");
+                        }
+
+                    } catch (Exception e) {
+                        prepareAndSendMarkdownMessage(chatId, String.valueOf(e), false);
+                        currentState = null;
                     }
                     break;
-                case IS_REPEATED:
-                    if (userInput.trim().equalsIgnoreCase("Да")) {
-                        isRepeated = true;
-                        currentState = InputState.DAYS_BETWEEN_DOSES;
-                        prepareAndSendMessage(chatId, "Введите перерыв между приемами в днях:");
-                    } else if (userInput.trim().equalsIgnoreCase("Нет")) {
-                        isRepeated = false;
-                        currentState = InputState.FREQUENCY;
-                        prepareAndSendMessage(chatId, "Введите частоту приема в день:");
-                    } else {
-                        prepareAndSendMessage(chatId, "Некорректный ввод. Пожалуйста, введите 'Да' или 'Нет' для указания повторного приема:");
-                    }
-                    break;
+
                 case DAYS_BETWEEN_DOSES:
                     try {
                         daysBetweenDoses = Integer.parseInt(userInput.trim());
-                        currentState = InputState.FREQUENCY;
-                        prepareAndSendMessage(chatId, "Введите частоту приема в день:");
+                        frequency(chatId);
+
+
                     } catch (NumberFormatException e) {
-                        prepareAndSendMessage(chatId, "Некорректный ввод. Пожалуйста, введите целое число для перерыва между приемами:");
-                    }
-                    break;
-                case FREQUENCY:
-                    try {
-                        frequency = Integer.parseInt(userInput.trim());
-                        // Добавление данных в базу данных
-                        addMedication(chatId, name, description, startDate, todayDate, duration, isRepeated, daysBetweenDoses, frequency);
-                        // Отправка подтверждения пользователю
-                        sendMessage(chatId, "Данные успешно добавлены в базу данных.");
-                        currentState = null;
-                        this.addFlag = false;
-                    } catch (NumberFormatException e) {
-                        prepareAndSendMessage(chatId, "Некорректный ввод. Пожалуйста, введите целое число для частоты приема:");
+                        prepareAndSendMarkdownMessage(
+                                chatId,
+                                "Некорректный ввод. Пожалуйста, введите целое число для перерыва между пр" +
+                                        "иемами!", false);
                     }
                     break;
                 default:
-                    prepareAndSendMessage(chatId, "Ошибка ввода данных. Некорректное состояние");
+                    prepareAndSendMarkdownMessage(
+                            chatId,
+                            "Ошибка ввода данных. Некорректное состояние, почему ты тут?",
+                            false);
+                    currentState = null;
                     break;
             }
         }
     }
 
-    // Метод для проверки корректности формата даты
+
+
+    private void frequency(long chatId){
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText("Cколько раз в день будет приниматься лекарство?");
+
+        String[] buttonTexts = {"1 раз", "2 раза", "3 раза"};
+        String[] callbackDatas = {ONE_FREQUENCY_BUTTON, TWO_FREQUENCY_BUTTON, THREE_FREQUENCY_BUTTON};
+        InlineKeyboardMarkup markupInLine = createInlineKeyboardMarkup(buttonTexts, callbackDatas);
+
+        message.setReplyMarkup(markupInLine);
+
+        executeMessage(message);
+
+    }
+
+    private void isRepeated(long chatId) {
+
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText("Будет ли повторный приём?");
+
+        String[] buttonTexts = {"Да", "Нет"};
+        String[] callbackDatas = {YES_IS_REPEATED_BUTTON, NO_IS_REPEATED_BUTTON};
+        InlineKeyboardMarkup markupInLine = createInlineKeyboardMarkup(buttonTexts, callbackDatas);
+
+        message.setReplyMarkup(markupInLine);
+
+        executeMessage(message);
+    }
+
+
+    /* Метод для проверки корректности формата даты */
     private boolean isValidDateFormat(String date) {
         String regex = "\\d{4}-\\d{2}-\\d{2}"; // Формат ГГГГ-ММ-ДД
         Pattern pattern = Pattern.compile(regex);
@@ -449,45 +510,23 @@ public class MedTrackerBot extends TelegramLongPollingBot {
         return true;
     }
 
-    // Метод для проверки, что дата начала приема не ранее текущей даты
+    /* Метод для проверки корректности формата времени */
+    private boolean isValidTimeFormat(String timeStr) {
+        String pattern = "^(?:[01]\\d|2[0-3]):[0-5]\\d$";
+        Pattern regexPattern = Pattern.compile(pattern);
+        Matcher matcher = regexPattern.matcher(timeStr);
+
+        if (!matcher.matches()) {return false;}
+
+        return true;
+    }
+
+    /* Метод для проверки, что дата начала приема не ранее текущей даты */
     private boolean isStartDateBeforeToday(String startDate) {
         LocalDate currentDate = LocalDate.now();
         LocalDate inputDate = LocalDate.parse(startDate, DateTimeFormatter.ISO_LOCAL_DATE);
         return inputDate.isBefore(currentDate);
     }
-
-    /* обработка данных для добавление данных о лекарствах в бд*/
-    // TODO не удалять
-    /*
-    private void InputMessage(String messageText, long chatId) {
-
-
-        SendMessage message = new SendMessage();
-        message.setChatId(String.valueOf(chatId));
-
-        String[] data = messageText.split(",");
-        //if (data.length != 6) {
-        //    sendMessage(chatId, INFO_TEXT);
-        //    return;
-        //}
-
-        String name = data[0].trim();
-        String description = data[1].trim();
-        String startDate = data[2].trim();
-        int duration = Integer.parseInt(data[3].trim());
-        boolean isRepeated = Boolean.parseBoolean(data[4].trim());
-        int daysBetweenDoses = Integer.parseInt(data[5].trim());
-        int frequency = Integer.parseInt(data[6].trim());
-        // Добавление данных в базу данных
-        addMedication(chatId, name, description, startDate, duration, isRepeated, daysBetweenDoses, frequency);
-
-        // Отправка подтверждения пользователю
-        sendMessage(chatId, "Данные успешно добавлены в базу данных.");
-        
-        this.addFlag = false;
-    }
-
-     */
 
     /* метод проверяет сколько запросов было введено в минуту,
     и если превышает 20 то выводится сообшение о превышение*/
@@ -511,7 +550,7 @@ public class MedTrackerBot extends TelegramLongPollingBot {
         }
     }
 
-    /*проверка ошибок для callback кнопок + текст*/
+    /*проверка ошибок для callback кнопок + добавляется текст*/
     private void executeEditMessageText(String text, long chatId, long messageId){
         EditMessageText message = new EditMessageText();
         message.setChatId(String.valueOf(chatId));
@@ -534,43 +573,138 @@ public class MedTrackerBot extends TelegramLongPollingBot {
         }
     }
 
-
-
     /*кнопки (согласен/несогласен) стать новымпользователем*/
     private void register(long chatId) {
 
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
         message.setText("Вы точно хотите зарегестрироваться?");
-        InlineKeyboardMarkup markupInLine = createInlineKeyboardMarkup(
-                "Да", YES_BUTTON,
-                "Нет", NO_BUTTON
-        );
+
+        String[] buttonTexts = {"Да", "Нет"};
+        String[] callbackDatas = {YES_REGISTER_BUTTON, NO_REGISTER_BUTTON};
+        InlineKeyboardMarkup markupInLine = createInlineKeyboardMarkup(buttonTexts, callbackDatas);
+
         message.setReplyMarkup(markupInLine);
 
         executeMessage(message);
     }
 
-    /*создание начальных кнопок под сообщением в чате*/
-    private InlineKeyboardMarkup createInlineKeyboardMarkup(String buttonText1, String callbackData1, String buttonText2, String callbackData2) {
+    /*создание начальных кнопок под сообщением в чате горизонтальных*/
+    private InlineKeyboardMarkup createInlineKeyboardMarkup(String[] buttonTexts, String[] callbackDatas) {
         InlineKeyboardMarkup markupInLine = new InlineKeyboardMarkup();
         List<List<InlineKeyboardButton>> rowsInLine = new ArrayList<>();
         List<InlineKeyboardButton> rowInLine = new ArrayList<>();
 
-        InlineKeyboardButton button1 = new InlineKeyboardButton();
-        button1.setText(buttonText1);
-        button1.setCallbackData(callbackData1);
+        for (int i = 0; i < buttonTexts.length; i++) {
+            InlineKeyboardButton button = new InlineKeyboardButton();
+            button.setText(buttonTexts[i]);
+            button.setCallbackData(callbackDatas[i]);
 
-        InlineKeyboardButton button2 = new InlineKeyboardButton();
-        button2.setText(buttonText2);
-        button2.setCallbackData(callbackData2);
+            rowInLine.add(button);
+        }
 
-        rowInLine.add(button1);
-        rowInLine.add(button2);
         rowsInLine.add(rowInLine);
-
         markupInLine.setKeyboard(rowsInLine);
         return markupInLine;
+    }
+
+    @Scheduled(fixedRate = 60000) // Run every 60 seconds
+    public void checkMedicationReminders() {
+        Iterable<User> usersIterable = userRepository.findAll();
+        List<User> users = StreamSupport
+                .stream(usersIterable.spliterator(), false)
+                .collect(Collectors.toList());
+        for (User user : users) {
+            long chatId = user.getChatId();
+            checkReminderTimesForUser(chatId);
+        }
+    }
+
+    public void checkReminderTimesForUser(long chatId) {
+        User user = userRepository.findById(chatId).orElse(null);
+
+        if (user != null) {
+            List<ReminderTime> reminderTimes = reminderTimeRepository.findByMedication_User(user);
+            LocalTime currentTime = LocalTime.now();
+
+            for (ReminderTime reminderTime : reminderTimes) {
+                LocalTime medicationTime = reminderTime.getTime();
+
+                if (medicationTime.equals(currentTime)) {
+                    Medication medication = reminderTime.getMedication();
+                    String message = "Пора принять лекарство: "
+                            + medication.getMedicineName()
+                            + "\nОписание: "
+                            + medication.getDescription();
+                    sendMessage(chatId, message);
+                }
+            }
+        }
+    }
+
+    private void InputRemiderTimeMessage(String userInput, long chatId, int frequency){
+        addReminderTimeToBD(chatId, medicationName, userInput);
+    }
+    private void addReminderTimeToBD(long chatId, String medicationName, String remiderTime){
+        addReminderTime(medicationName, remiderTime, chatId);
+        sendMessage(chatId, "Будильник успешно добавлен в базу данных.");
+    }
+
+    /* Создание SQL-запроса для добавления новой записи в базу данных */
+   protected void addReminderTime(String medicationName, String time, long chatId) {
+       try {
+           User user = userRepository.findById(chatId).orElse(null);
+           Medication medication = medicationRepository.findByMedicineNameAndUser(medicationName, user);
+
+           if (medication != null) {
+
+               SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm");
+               Date parsedTime = timeFormat.parse(time);
+               LocalTime localTime = parsedTime.toInstant().atZone(ZoneId.systemDefault()).toLocalTime();
+
+               ReminderTime reminderTime = new ReminderTime();
+               reminderTime.setMedication(medication);
+               reminderTime.setTime(localTime);
+               reminderTimeRepository.save(reminderTime);
+           } else {
+               sendMessage(chatId, "Такого будьника нет!! Что-то ты сделал не так дорогой друг");
+           }
+       } catch (Exception e) {
+           log.error(ERROR_TEXT + e.getMessage());
+       }
+   }
+
+
+    private void addMedicationToBD(long chatId){
+        addMedication(chatId, medicationName, description, startDate, todayDate, duration, isRepeated, daysBetweenDoses, frequency);
+        // Отправка подтверждения пользователю
+        sendMessage(chatId, "Данные о лекарстве успешно добавлены в базу данных.");
+        currentState = InputState.HH_MM;
+    }
+
+    /* Создание SQL-запроса для добавления новой записи в базу данных */
+    protected void addMedication(long chatId, String name, String description, String startDate, String todayDate, int duration, boolean isRepeated, int daysBetweenDoses, int frequency) {
+        try {
+            Medication medication = new Medication();
+            User user = userRepository.findById(chatId).orElse(null);
+
+            medication.setUser(user);
+            medication.setId(chatId);
+            medication.setMedicineName(name);
+            medication.setDescription(description);
+
+            DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+            LocalDate parsedStartDate = LocalDate.parse(startDate, dateFormatter);
+            medication.setStartDate(parsedStartDate);
+            medication.setTodayDate(new Timestamp(System.currentTimeMillis()));
+            medication.setDaysForEndDate(duration);
+            medication.setIsRepeated(isRepeated);
+            medication.setDaysBetweenDoses(daysBetweenDoses);
+            medication.setDosesForDay(frequency);
+            medicationRepository.save(medication);
+        } catch (Exception e) {
+            log.error(ERROR_TEXT + e.getMessage());
+        }
     }
 
     /*регистрация нового пользователя*/
@@ -616,7 +750,7 @@ public class MedTrackerBot extends TelegramLongPollingBot {
         return keyboardMarkup;
     }
 
-
+    /*отпрака сообщения с возможностью сделать текст жирным*/
     private void prepareAndSendMarkdownMessage(long chatId, String textToSend, boolean parseMarkdown) {
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
@@ -626,14 +760,6 @@ public class MedTrackerBot extends TelegramLongPollingBot {
         executeMessage(message);
     }
 
-    /*отпрака сообщения*/
-    private void prepareAndSendMessage ( long chatId, String textToSend){
-        SendMessage message = new SendMessage();
-        message.setChatId(String.valueOf(chatId));
-        message.setText(textToSend);
-
-        executeMessage(message);
-    }
 
     /*отпрака сообщения + отображение начальных кнопок*/
     private void sendMessage ( long chatId, String textToSend){
@@ -643,8 +769,9 @@ public class MedTrackerBot extends TelegramLongPollingBot {
         message.setText(textToSend);
 
         ReplyKeyboardMarkup keyboardMarkup = createKeyboardMarkup(
-                new String[]{"Посмотр истории приёма", "Начать приём нового лекарства", "Текущий приём"},
-                new String[]{"register", "check my data", "delete my data"}
+                new String[]{"Просмотр истории приёма"},
+                new String[]{"Текущий приём"},
+                new String[]{"Начать приём нового лекарства"}
         );
         message.setReplyMarkup(keyboardMarkup);
 
